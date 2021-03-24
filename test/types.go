@@ -1,6 +1,6 @@
 package test
 
-//go:generate jobq -package test -task Task -result Result
+//go:generate ../jobq -package test -task Task -result Result
 
 type Task struct {
 	ID    int
