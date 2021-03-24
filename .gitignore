@@ -1,0 +1,12 @@
+# Binary
+jobq
+
+# Test
+coverage.out
+test/jobq.go
+
+# macOS
+.DS_Store
+
+# Dev
+.idea/
