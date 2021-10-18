@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-//go:embed jobq.tmpl
+//go:embed ../jobq.go
 var jobqTemplate string
 
 type Options struct {

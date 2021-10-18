@@ -1,4 +1,4 @@
-package test
+package jobq
 
 import (
 	"errors"
