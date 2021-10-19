@@ -10,14 +10,14 @@ type DoFunc func(task Task) (Result, error)
 
 // Task represents task to add to queue.
 type Task interface {
-	// Task is used only for type safety.
-	Task()
+	// TaskType is used only for type safety.
+	TaskType()
 }
 
 // Result represents result of the task.
 type Result interface {
-	// Result is used only for type safety.
-	Result()
+	// ResultType is used only for type safety.
+	ResultType()
 }
 
 // TaskGroup represents group of tasks to process.
@@ -71,9 +71,6 @@ type queue struct {
 	// todo is a channel of ready to process jobs.
 	todo chan *job
 
-	// toretry is a channel of jobs to retry.
-	toretry chan *job
-
 	// results is a storage for task results.
 	results *results
 
@@ -90,7 +87,6 @@ func New(do DoFunc, workers int, capacity int) Queue {
 		capacity:     capacity,
 		workersCount: workers,
 		todo:         make(chan *job, capacity),
-		toretry:      make(chan *job, capacity),
 		results:      newResults(capacity),
 		counter:      newCounter(),
 	}
@@ -108,7 +104,6 @@ func (q *queue) Start() {
 func (q *queue) Close() {
 	close(q.todo)
 	q.workersWG.Wait()
-	close(q.toretry)
 	q.results.close()
 }
 
@@ -161,25 +156,8 @@ func (q *queue) add(j *job) {
 func (q *queue) worker(id int) {
 	defer q.workersWG.Done()
 
-loop:
-	for {
-		select {
-		case j := <-q.toretry:
-			if j != nil {
-				q.process(j)
-			}
-		default:
-			select {
-			case j := <-q.todo:
-				if j != nil {
-					q.process(j)
-				} else {
-					break loop
-				}
-			default:
-				break
-			}
-		}
+	for j := range q.todo {
+		q.process(j)
 	}
 }
 
@@ -189,15 +167,10 @@ func (q *queue) process(j *job) {
 
 	if err != nil {
 		if _, ok := err.(*retryable); ok {
-			q.retry(j)
+			q.process(j)
 			return
 		}
 	}
 
 	j.onResult(res, err)
-}
-
-// retry adds job back into todo queue.
-func (q *queue) retry(j *job) {
-	q.toretry <- j
 }

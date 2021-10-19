@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -14,42 +15,20 @@ import (
 
 var errTest = errors.New("test")
 
+func containsInt(nn []int, n int) bool {
+	for _, i := range nn {
+		if i == n {
+			return true
+		}
+	}
+	return false
+}
+
 type DoMock struct {
 	mock.Mock
-	progress   int
-	progressWG sync.WaitGroup
-	wait       sync.WaitGroup
+	progress int
+	wait     sync.WaitGroup
 }
-
-//
-// Task
-//
-
-type Task struct {
-	ID    int
-	Retry bool
-	Err   bool
-}
-
-func (t *Task) Task() {}
-
-var _ jobq.Task = new(Task)
-
-//
-// Result
-//
-
-type Result struct {
-	task *Task
-}
-
-func (r *Result) Result() {}
-
-var _ jobq.Result = new(Result)
-
-//
-// DoFunc
-//
 
 func (do *DoMock) Do(task jobq.Task) (jobq.Result, error) {
 
@@ -60,12 +39,7 @@ func (do *DoMock) Do(task jobq.Task) (jobq.Result, error) {
 		return nil, errors.New("cast failed")
 	}
 
-	defer func() {
-		if t.ID < do.progress {
-			do.progressWG.Done()
-		}
-	}()
-
+	// Tasks with ID >= progress will be waiting for do.wait WaitGroup.
 	if t.ID >= do.progress {
 		do.wait.Wait()
 	}
@@ -84,18 +58,66 @@ func (do *DoMock) Do(task jobq.Task) (jobq.Result, error) {
 	return &Result{task: t}, nil
 }
 
-func TestJobqueue(t *testing.T) {
+//
+// Task
+//
+
+type Task struct {
+	ID    int
+	Retry bool
+	Err   bool
+}
+
+func (t *Task) TaskType() {}
+
+var _ jobq.Task = new(Task)
+
+//
+// Result
+//
+
+type Result struct {
+	task *Task
+}
+
+func (r *Result) ResultType() {}
+
+var _ jobq.Result = new(Result)
+
+//
+// Test
+//
+
+func TestAll(t *testing.T) {
 
 	tests := []struct {
-		jobs     int
-		workers  int
-		errID    int
-		retryID  int
-		progress int
+		jobs     int   // count of jobs
+		workers  int   // count of workers
+		errs     []int // ids of jobs which must return error
+		retries  []int // ids of jobs which must be retried
+		progress int   // count of jobs which must be finished (the rest will wait for do.wait)
 	}{
-		{jobs: 10, workers: 3, errID: 5, retryID: 6, progress: 5},
-		{jobs: 100, workers: 5, errID: 5, retryID: 50, progress: 10},
-		{jobs: 100, workers: 50, errID: 50, retryID: 80, progress: 80},
+		{
+			jobs:     10,
+			workers:  3,
+			errs:     []int{3, 4, 5},
+			retries:  []int{6, 8},
+			progress: 5,
+		},
+		{
+			jobs:     100,
+			workers:  5,
+			errs:     []int{5, 10, 99},
+			retries:  []int{50},
+			progress: 10,
+		},
+		{
+			jobs:     100,
+			workers:  50,
+			errs:     []int{50},
+			retries:  []int{80},
+			progress: 80,
+		},
 	}
 
 	for i, tt := range tests {
@@ -105,20 +127,35 @@ func TestJobqueue(t *testing.T) {
 				panic("invald test case: progress must be less then jobs count")
 			}
 
-			if tt.errID > tt.jobs || tt.retryID > tt.jobs {
-				panic("invalid test case: id must be less then jobs count")
+			for _, id := range tt.errs {
+				if id > tt.jobs {
+					panic("invalid test case: id must be less then jobs count")
+				}
+
+				if containsInt(tt.retries, id) {
+					panic("invalid test case: id must not be same as in retries")
+				}
+			}
+
+			for _, id := range tt.retries {
+				if id > tt.jobs {
+					panic("invalid test case: id must be less then jobs count")
+				}
+
+				if containsInt(tt.errs, id) {
+					panic("invalid test case: id must not be same as in errs")
+				}
 			}
 
 			do := &DoMock{
 				progress: tt.progress,
 			}
 
-			do.progressWG.Add(tt.progress)
-
+			// Tasks with ID >= progress will be waiting for do.wait.
 			for i := 0; i < tt.jobs; i++ {
-				if i == tt.retryID {
+				if containsInt(tt.retries, i) {
 					do.On("Do", &Task{ID: i, Retry: true}).Return().Once()
-				} else if i == tt.errID {
+				} else if containsInt(tt.errs, i) {
 					do.On("Do", &Task{ID: i, Err: true}).Return().Once()
 					continue
 				}
@@ -126,15 +163,16 @@ func TestJobqueue(t *testing.T) {
 			}
 
 			queue := jobq.New(do.Do, tt.workers, tt.jobs)
+			createdAt := time.Now()
 
 			queue.Start()
 
-			wg := sync.WaitGroup{}
-			wg.Add(1)
+			waitResults := sync.WaitGroup{}
+			waitResults.Add(1)
 
 			// Process results
 			go func() {
-				defer wg.Done()
+				defer waitResults.Done()
 
 				var (
 					res jobq.Result
@@ -149,44 +187,86 @@ func TestJobqueue(t *testing.T) {
 						// The only error that could happen is testErr.
 						assert.Error(t, errTest, err)
 						errs++
-						continue
 					}
 
 					done++
 				}
 
 				// All jobs must be proccessed.
-				assert.Equal(t, tt.jobs-1, done)
+				assert.Equal(t, tt.jobs, done)
 
 				// There must be only 1 error.
-				assert.Equal(t, 1, errs)
+				assert.Equal(t, len(tt.errs), errs)
+			}()
+
+			group := queue.Group()
+			groupCreatedAt := time.Now()
+
+			// Collect results from group
+			waitResults.Add(1)
+
+			// Process results from group.
+			go func() {
+				defer waitResults.Done()
+
+				var (
+					res jobq.Result
+					err error
+				)
+
+				done := 0
+
+				for group.Next(&res, &err) {
+					done++
+				}
+
+				// All jobs must be proccessed.
+				assert.Equal(t, tt.progress, done)
 			}()
 
 			do.wait.Add(1)
 
+			// Add jobs to queue or group.
 			for i := 0; i < tt.jobs; i++ {
 				task := &Task{
 					ID:    i,
-					Retry: i == tt.retryID,
-					Err:   i == tt.errID,
+					Retry: containsInt(tt.retries, i),
+					Err:   containsInt(tt.errs, i),
 				}
 
-				queue.Add(task)
+				// Add jobs with ID < tt.progress to group.
+				// Add all other jobs to queue.
+				if i < tt.progress {
+					group.Add(task)
+				} else {
+					queue.Add(task)
+				}
 			}
 
-			// Wait for jobs to finish to compare progress.
-			do.progressWG.Wait()
+			// Wait for tasks with ID < progress
+			group.Wait()
+			group.Close()
+
+			// Check progress on group
+			assert.Equal(t, 1.0, group.Progress())
+
+			// Check speed on group
+			assert.InDelta(t, float64(tt.progress)/float64(time.Since(groupCreatedAt).Seconds()), group.Speed(), 500)
+
+
+			// Check speed on queue.
+			assert.InDelta(t, float64(tt.progress)/float64(time.Since(createdAt).Seconds()), queue.Speed(), 500)
+
+			// Check progress on queue.
 			assert.Equal(t, float64(tt.progress)/float64(tt.jobs), queue.Progress())
 
 			// Unlock rest of jobs.
 			do.wait.Done()
 
+			// Wait for all jobs to finish.
 			queue.Wait()
-
 			queue.Close()
-
-			// Wait erors and output processors.
-			wg.Wait()
+			waitResults.Wait()
 
 			do.AssertExpectations(t)
 		})
