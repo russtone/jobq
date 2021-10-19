@@ -1,4 +1,4 @@
-package jobq
+package jobq_test
 
 import (
 	"errors"
@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/russtone/jobq"
 )
 
 var errTest = errors.New("test")
@@ -19,32 +21,67 @@ type DoMock struct {
 	wait       sync.WaitGroup
 }
 
-func (do *DoMock) Do(task *Task) (*Result, error) {
+//
+// Task
+//
+
+type Task struct {
+	ID    int
+	Retry bool
+	Err   bool
+}
+
+func (t *Task) Task() {}
+
+var _ jobq.Task = new(Task)
+
+//
+// Result
+//
+
+type Result struct {
+	task *Task
+}
+
+func (r *Result) Result() {}
+
+var _ jobq.Result = new(Result)
+
+//
+// DoFunc
+//
+
+func (do *DoMock) Do(task jobq.Task) (jobq.Result, error) {
 
 	do.Called(task)
 
+	t, ok := task.(*Task)
+	if !ok {
+		return nil, errors.New("cast failed")
+	}
+
 	defer func() {
-		if task.ID < do.progress {
+		if t.ID < do.progress {
 			do.progressWG.Done()
 		}
 	}()
 
-	if task.ID >= do.progress {
+	if t.ID >= do.progress {
 		do.wait.Wait()
 	}
 
 	// Error.
-	if task.Err {
-		task.Err = false
+	if t.Err {
+		t.Err = false
 		return nil, errTest
 	}
 
-	if task.Retry {
-		task.Retry = false
-		return nil, Retry(nil)
+	if t.Retry {
+		t.Retry = false
+		return nil, jobq.Retry(nil)
 	}
 
-	return &Result{Task: task}, nil
+	return &Result{task: t}, nil
 }
 
 func TestJobqueue(t *testing.T) {
@@ -88,7 +125,7 @@ func TestJobqueue(t *testing.T) {
 				do.On("Do", &Task{ID: i}).Return().Once()
 			}
 
-			queue := newQueue(do.Do, tt.workers, tt.jobs)
+			queue := jobq.New(do.Do, tt.workers, tt.jobs)
 
 			queue.Start()
 
@@ -100,7 +137,7 @@ func TestJobqueue(t *testing.T) {
 				defer wg.Done()
 
 				var (
-					res *Result
+					res jobq.Result
 					err error
 				)
 
@@ -146,7 +183,7 @@ func TestJobqueue(t *testing.T) {
 
 			queue.Wait()
 
-			queue.Stop()
+			queue.Close()
 
 			// Wait erors and output processors.
 			wg.Wait()

@@ -4,7 +4,7 @@
 
 .PHONY: build
 build:
-	@go build -o jobq .
+	@go build
 
 #
 # Test
@@ -12,6 +12,12 @@ build:
 
 .PHONY: test
 test:
-	@cd test && \
-	 go generate && \
-	 go test -v -coverprofile ../coverage.out
+	@go test -v -race -coverprofile coverage.out
+
+#
+# Coverage
+#
+
+.PHONY: coverage
+coverage:
+	@go tool cover -html coverage.out
