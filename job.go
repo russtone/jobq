@@ -27,9 +27,8 @@ func (j *job) onAdd() {
 }
 
 func (j *job) onResult(res Result, err error) {
-	j.counter.incProcessed()
-
 	j.results.store(res, err)
+	j.counter.incProcessed()
 
 	if j.wrapped != nil {
 		j.wrapped.onResult(res, err)
