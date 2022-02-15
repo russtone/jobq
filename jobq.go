@@ -2,6 +2,7 @@
 package jobq
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -81,11 +82,19 @@ type queue struct {
 var _ Queue = new(queue)
 
 // New is a constructor for Queue.
-func New(do DoFunc, workers int, capacity int) Queue {
+func New(do DoFunc, workersCount, capacity int) Queue {
+	if workersCount <= 0 {
+		panic(fmt.Sprintf("invalid workersCount: %d", workersCount))
+	}
+
+	if capacity <= 0 {
+		panic(fmt.Sprintf("invalid capacity: %d", capacity))
+	}
+
 	return &queue{
 		do:           do,
 		capacity:     capacity,
-		workersCount: workers,
+		workersCount: workersCount,
 		todo:         make(chan *job, capacity),
 		results:      newResults(capacity),
 		counter:      newCounter(),
